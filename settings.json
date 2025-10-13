@@ -1,0 +1,15 @@
+{
+  "accent": "#1F1F1F",
+  "app_font": "timesi",
+  "app_pt": 12.0,
+  "mic_index": null,
+  "ui_bg": "#000000",
+  "ui_fg": "#FFFFFF",
+  "btn_bg": "#000000",
+  "btn_fg": "#FFFFFF",
+  "render_bg": [
+    255,
+    255,
+    255
+  ]
+}
