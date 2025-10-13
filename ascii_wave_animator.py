@@ -6,6 +6,13 @@ ASCII Wave Animator — Figma Design Edition
 import sys, os, math, re, glob, random, json
 from dataclasses import dataclass
 import numpy as np
+# Предпочитаем scipy, но безопасно фоллбэкаемся, если её нет
+try:
+    from scipy.ndimage import gaussian_filter as _scipy_gaussian_filter
+    SCIPY_AVAILABLE = True
+except Exception:
+    _scipy_gaussian_filter = None
+    SCIPY_AVAILABLE = False
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 from PySide6.QtCore import Qt, QTimer, Signal, QThread, QSize, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QImage, QPixmap, QAction, QColor, QFont, QIcon, QPainter, QPen, QRadialGradient, QPainterPath, QRegion, QFontDatabase, QIntValidator
@@ -13,7 +20,8 @@ from PySide6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QFileDialog, QVBoxLayout, QHBoxLayout,
     QSlider, QCheckBox, QGroupBox, QMessageBox, QLineEdit, QComboBox, QColorDialog,
     QTabWidget, QScrollArea, QGridLayout, QSizePolicy, QInputDialog, QDialog, QProgressBar,
-    QGraphicsDropShadowEffect, QGraphicsBlurEffect, QStackedWidget
+    QGraphicsDropShadowEffect, QGraphicsBlurEffect, QGraphicsOpacityEffect, QStackedWidget,
+    QDialogButtonBox
 )
 
 try:
@@ -26,28 +34,29 @@ ASCII_RAMP_EXT = " .`^\",:;Il!i><~+_-?][}{1)(|/\\tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*
 
 def load_icon(icon_name, size=24):
     """
-    Загружает SVG иконку из папки icons/
-    
-    Args:
-        icon_name: имя файла без расширения (например 'import', 'export', 'play')
-        size: размер иконки в пикселях (по умолчанию 24)
-    
-    Returns:
-        QIcon или None если файл не найден
-    
-    Пример:
-        icon = load_icon('import', size=20)
-        if icon:
-            button.setIcon(icon)
-            button.setIconSize(QSize(20, 20))
+    Загружает иконку ТОЛЬКО из локальной папки проекта `icons/`.
+    Ищем строго по именам файлов, существующим в этой папке, без внешних каталогов.
+    Поддерживаются расширения: .svg, .png (а также редкий .svg.svg для обратной совместимости).
     """
-    icon_path = os.path.join(os.path.dirname(__file__), "icons", f"{icon_name}.svg")
-    
-    if os.path.exists(icon_path):
-        return QIcon(icon_path)
-    else:
-        # Если иконка не найдена, возвращаем None (будет показан текст кнопки)
+    base_dir = os.path.dirname(__file__)
+    icons_dir = os.path.join(base_dir, "icons")
+    if not os.path.isdir(icons_dir):
         return None
+    try:
+        present = {fn.lower(): os.path.join(icons_dir, fn) for fn in os.listdir(icons_dir)}
+    except Exception:
+        return None
+    # Список имён-кандидатов по приоритету
+    candidates = [
+        f"{icon_name}.svg",
+        f"{icon_name}.svg.svg",
+        f"{icon_name}.png",
+    ]
+    for name in candidates:
+        p = present.get(name.lower())
+        if p and os.path.exists(p):
+            return QIcon(p)
+    return None
 
 def clamp01(x):
     return np.clip(x, 0.0, 1.0)
@@ -215,8 +224,9 @@ class NewStepperWidget(QWidget):
         self.parent_window = parent
         self.label_text = label_text
         
-        # Устанавливаем фиксированную ширину виджета: число 68px + spacing 5px + таблетка 93px = 166px
-        self.setFixedWidth(166)
+        # Адаптивная ширина: минимум для сохранения дизайна, растягивается по горизонтали
+        self.setMinimumWidth(166)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -225,7 +235,9 @@ class NewStepperWidget(QWidget):
         # Числовое поле (68x44px) - теперь редактируемое
         self.display = QLineEdit(str(value))
         self.display.setAlignment(Qt.AlignCenter)
-        self.display.setFixedSize(68, 44)
+        self.display.setFixedHeight(44)
+        self.display.setMinimumWidth(56)
+        self.display.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.display.setStyleSheet("""
             QLineEdit {
                 background: transparent;
@@ -249,7 +261,9 @@ class NewStepperWidget(QWidget):
         
         # Контейнер для кнопок -/+ "таблетка" с общей обводкой
         buttons_container = QWidget()
-        buttons_container.setFixedSize(93, 44)  # Увеличиваем на 4px для border (2px с каждой стороны)
+        buttons_container.setFixedHeight(44)
+        buttons_container.setMinimumWidth(76)
+        buttons_container.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
         buttons_container.setStyleSheet("""
             QWidget {
                 background: transparent;
@@ -263,7 +277,8 @@ class NewStepperWidget(QWidget):
         
         # Кнопка минус (44x40px, с учетом margins будет помещаться)
         self.btn_minus = QPushButton("-")
-        self.btn_minus.setFixedSize(44, 40)
+        self.btn_minus.setFixedHeight(40)
+        self.btn_minus.setMinimumWidth(36)
         self.btn_minus.setStyleSheet("""
             QPushButton {
                 background: transparent;
@@ -283,7 +298,8 @@ class NewStepperWidget(QWidget):
         
         # Кнопка плюс (44x40px, с учетом margins будет помещаться)
         self.btn_plus = QPushButton("+")
-        self.btn_plus.setFixedSize(44, 40)
+        self.btn_plus.setFixedHeight(40)
+        self.btn_plus.setMinimumWidth(36)
         self.btn_plus.setStyleSheet("""
             QPushButton {
                 background: transparent;
@@ -318,8 +334,8 @@ class NewStepperWidget(QWidget):
         buttons_layout.addWidget(separator_container)
         buttons_layout.addWidget(self.btn_plus)
         
-        layout.addWidget(self.display)
-        layout.addWidget(buttons_container)
+        layout.addWidget(self.display, 1)
+        layout.addWidget(buttons_container, 0)
         
         self.btn_minus.clicked.connect(self.decrease)
         self.btn_plus.clicked.connect(self.increase)
@@ -1125,15 +1141,26 @@ class SettingsDialog(QDialog):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setStyleSheet("background: transparent;")
         
-        # Хранилище настроек
-        self.colors = {
-            'ui_bg': '#000000',
-            'ui_text': '#FFFFFF',
-            'button_bg': '#FFFFFF',
-            'button_border': '#FFFFFF',
-            'button_text': '#FFFFFF',
-            'accent': '#FFFFFF'
-        }
+        # Хранилище настроек (инициализируем из темы главного окна)
+        if parent and hasattr(parent, 'get_ui_theme'):
+            theme = parent.get_ui_theme()
+            self.colors = {
+                'ui_bg': theme.get('ui_bg', '#3F3F3F'),
+                'ui_text': theme.get('ui_text', '#FFFFFF'),
+                'button_bg': theme.get('button_bg', '#FFFFFF'),
+                'button_border': theme.get('button_border', '#FFFFFF'),
+                'button_text': theme.get('button_text', '#000000'),
+                'accent': theme.get('accent', '#FFFFFF'),
+            }
+        else:
+            self.colors = {
+                'ui_bg': '#3F3F3F',
+                'ui_text': '#FFFFFF',
+                'button_bg': '#FFFFFF',
+                'button_border': '#FFFFFF',
+                'button_text': '#000000',
+                'accent': '#FFFFFF'
+            }
         
         # Получаем текущие настройки из главного окна, если есть
         if parent:
@@ -1945,11 +1972,11 @@ class SettingsDialog(QDialog):
         self._mark_as_changed()
     
     def _pick_color_new(self, key):
-        # Open color picker for new interface
+        # Color picker через обертку с гарантированными кнопками OK/Cancel
         current_color = QColor(self.colors[key])
-        color = QColorDialog.getColor(current_color, self)
-        if color.isValid():
-            hex_color = color.name()
+        picked = self._open_color_picker(current_color)
+        if picked is not None and picked.isValid():
+            hex_color = picked.name()
             self.colors[key] = hex_color
             # Update input field
             self.color_inputs[key].setText(hex_color)
@@ -1965,6 +1992,18 @@ class SettingsDialog(QDialog):
                 }}
             """)
             self._mark_as_changed()
+    
+    def _open_color_picker(self, initial_color: 'QColor'):
+        # Прямой QColorDialog (нативный), со сбросом стилей — чтобы кнопки и контент точно были
+        dlg = QColorDialog(None)  # без родителя, чтобы не наследовать стили
+        dlg.setWindowModality(Qt.ApplicationModal)
+        dlg.setOption(QColorDialog.ShowAlphaChannel, False)
+        dlg.setOption(QColorDialog.NoButtons, False)
+        dlg.setOption(QColorDialog.DontUseNativeDialog, True)  # Qt-версия с кнопками
+        dlg.setCurrentColor(initial_color)
+        if dlg.exec():
+            return dlg.currentColor()
+        return None
     
     def _on_font_changed(self, text):
         # Handle font change
@@ -1990,8 +2029,18 @@ class SettingsDialog(QDialog):
             new_font = QFont(self.font_family, self.font_size)
             app.setFont(new_font)
             
-            # Обновляем главное окно если оно есть
+            # Применяем цвета интерфейса в главное окно
             if self.main_window:
+                theme = self.main_window.get_ui_theme()
+                theme.update({
+                    'ui_bg': self.colors.get('ui_bg', theme['ui_bg']),
+                    'ui_text': self.colors.get('ui_text', theme['ui_text']),
+                    'button_bg': self.colors.get('button_bg', theme['button_bg']),
+                    'button_text': self.colors.get('button_text', theme['button_text']),
+                    'button_border': self.colors.get('button_border', theme['button_border']),
+                    'accent': self.colors.get('accent', theme['accent']),
+                })
+                self.main_window.apply_ui_theme(theme)
                 self.main_window.update()
                 # Перерисовываем preview чтобы применить новый шрифт к ASCII
                 if hasattr(self.main_window, 'glyph_cache'):
@@ -2026,13 +2075,17 @@ class TabBubble(QPushButton):
         self.setCheckable(True)
         self.setFixedHeight(60)
         self.setCursor(Qt.PointingHandCursor)
+        # Графический эффект прозрачности для точного контроля opacity
+        self._opacity_effect = QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(self._opacity_effect)
         self.updateStyle()
         self.toggled.connect(self.updateStyle)
     
     def updateStyle(self):
         # Обновляет стиль в зависимости от состояния (активный/неактивный)
         if self.isChecked():
-            # Активный таб: opacity 100%
+            # Активный таб: 100% opacity, черный фон
+            self._opacity_effect.setOpacity(1.0)
             self.setStyleSheet("""
                 QPushButton {
                     background: rgba(0,0,0,1);
@@ -2044,13 +2097,17 @@ class TabBubble(QPushButton):
                     font-weight: 500;
                     font-family: 'Helvetica Neue', 'Segoe UI', 'Helvetica', 'Arial', sans-serif;
                 }
+                QPushButton:hover {
+                    background: rgba(0,0,0,1);
+                }
             """)
         else:
-            # Неактивный таб: opacity 30%
+            # Неактивный таб: 30% opacity, черный фон как в основном UI
+            self._opacity_effect.setOpacity(0.3)
             self.setStyleSheet("""
                 QPushButton {
-                    background: rgba(0,0,0,0.3);
-                    color: rgba(255,255,255,0.6);
+                    background: rgba(0,0,0,1);
+                    color: white;
                     border: none;
                     border-radius: 30px;
                     padding: 15px 30px;
@@ -2059,7 +2116,7 @@ class TabBubble(QPushButton):
                     font-family: 'Helvetica Neue', 'Segoe UI', 'Helvetica', 'Arial', sans-serif;
                 }
                 QPushButton:hover {
-                    background: rgba(0,0,0,0.5);
+                    background: rgba(0,0,0,1);
                 }
             """)
 
@@ -2219,7 +2276,9 @@ class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ASCI-инатор")
-        self.resize(1920, 1080)
+        # Стартовый размер, разрешаем свободное изменение
+        self.resize(1280, 800)
+        self.setMinimumSize(800, 600)
         
         # Загружаем кастомный шрифт UI
         self._load_ui_font()
@@ -2305,6 +2364,16 @@ class MainWindow(QWidget):
         self.stepper_height = None
         self.cb_loop = None
         
+        # Тема UI (может быть переназначена через настройки)
+        self.ui_theme = {
+            'ui_bg': '#3F3F3F',
+            'ui_text': '#FFFFFF',
+            'button_bg': '#FFFFFF',
+            'button_text': '#000000',
+            'button_border': '#FFFFFF',
+            'accent': '#FFFFFF',
+        }
+        
         self._build_ui()
         self._apply_figma_style()
         self._sync_color_ui()  # Синхронизируем начальные цвета с UI
@@ -2312,6 +2381,60 @@ class MainWindow(QWidget):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.on_tick)
         self.timer.start(30)
+
+        # Первичная синхронизация иконки play/pause
+        self._update_play_button_icon()
+        self._last_running_state = self.running
+
+    def _on_play_toggled(self, checked: bool):
+        # Источник истины — состояние кнопки
+        self.running = bool(checked)
+        self._update_play_button_icon()
+
+    def _set_running(self, is_running: bool):
+        if getattr(self, 'running', None) == is_running:
+            return
+        self.running = is_running
+        self._update_play_button_icon()
+
+    def resizeEvent(self, event):
+        # Брейкпоинт для нижних кнопок: один ряд на широких окнах, два ряда на узких
+        self._arrange_bottom_buttons()
+        # Подгоняем ширину контейнера кнопок под ширину превью
+        try:
+            if hasattr(self, 'preview_box') and hasattr(self, 'buttons_container'):
+                self.buttons_container.setFixedWidth(self.preview_box.width())
+        except:
+            pass
+        super().resizeEvent(event)
+
+    def _arrange_bottom_buttons(self):
+        # Раскладывает кнопки по сетке в зависимости от ширины окна
+        if not hasattr(self, 'bottom_buttons_layout'):
+            return
+        grid = self.bottom_buttons_layout
+        # Очистка позиций (не удаляем виджеты)
+        while grid.count():
+            item = grid.takeAt(0)
+            # ничего, просто очищаем раскладку
+        width = self.width()
+        wide = width >= 1400
+        if wide:
+            # Один ряд: импорт, генерация, настройки, второй, экспорт, play
+            grid.addWidget(self.btn_import, 0, 0)
+            grid.addWidget(self.btn_generate, 0, 1)
+            grid.addWidget(self.btn_settings, 0, 2)
+            grid.addWidget(self.btn_second, 0, 3)
+            grid.addWidget(self.btn_export, 0, 4)
+            grid.addWidget(self.btn_play_pause, 0, 5, Qt.AlignLeft)
+        else:
+            # Два ряда: как в макете для узких
+            grid.addWidget(self.btn_import, 0, 0)
+            grid.addWidget(self.btn_settings, 0, 1)
+            grid.addWidget(self.btn_export, 0, 2)
+            grid.addWidget(self.btn_generate, 1, 0)
+            grid.addWidget(self.btn_second, 1, 1)
+            grid.addWidget(self.btn_play_pause, 1, 2, Qt.AlignLeft)
         
     def closeEvent(self, event):
         # Корректное закрытие приложения
@@ -2434,27 +2557,37 @@ class MainWindow(QWidget):
         
         # Preview с скругленными углами (через контейнер с антиалиасингом)
         preview_container = RoundedPreviewContainer()
-        preview_container.setMinimumSize(1293, 942)
+        # Адаптивный превью: уменьшаем минимальный размер и разрешаем растягиваться
+        preview_container.setMinimumSize(600, 360)
+        preview_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.preview = preview_container.preview  # Получаем ссылку на внутренний PreviewArea
+        self.preview_box = preview_container      # Контейнер превью (для выравнивания кнопок)
         left_layout.addWidget(preview_container, 1)
         
-        # Кнопки внизу (3 группы)
-        bottom_btns = QHBoxLayout()
-        bottom_btns.setSpacing(20)
+        # Кнопки внизу (адаптивная сетка 2 ряда)
+        bottom_btns = QGridLayout()
+        bottom_btns.setHorizontalSpacing(20)
+        bottom_btns.setVerticalSpacing(12)
         
         # ГРУППА 1: Импорт и Генерация паттерна
-        self.btn_import = QPushButton("импорт ⬇")
+        self.btn_import = QPushButton("импорт")
         self.btn_import.setFixedSize(180, 44)
         self.btn_import.clicked.connect(self.on_load)
+        try:
+            icon = load_icon('import', size=20)
+            if icon:
+                self.btn_import.setIcon(icon)
+                self.btn_import.setIconSize(QSize(20, 20))
+        except:
+            pass
         
         self.btn_generate = QPushButton("генерация паттерна")
         self.btn_generate.setFixedSize(180, 44)
         self.btn_generate.setObjectName("BlackButtonNoBorder")
         self.btn_generate.clicked.connect(self.on_generate_pattern)
         
-        bottom_btns.addWidget(self.btn_import)
-        bottom_btns.addWidget(self.btn_generate)
-        bottom_btns.addStretch()  # Отступ между группой 1 и группой 2
+        # Верхний ряд: импорт, настройки, экспорт
+        bottom_btns.addWidget(self.btn_import, 0, 0)
         
         # ГРУППА 2: Настройки, Второй вьюпорт, Экспорт (по центру)
         self.btn_settings = QPushButton("настройки")
@@ -2467,27 +2600,56 @@ class MainWindow(QWidget):
         self.btn_second.setObjectName("BlackButtonNoBorder")
         self.btn_second.clicked.connect(self.on_second_window)
         
-        self.btn_export = QPushButton("экспорт ⬇")
+        self.btn_export = QPushButton("экспорт\u00A0\u00A0")
         self.btn_export.setFixedSize(162, 44)
         self.btn_export.clicked.connect(self.on_export)
+        try:
+            icon = load_icon('export', size=20)
+            if icon:
+                self.btn_export.setIcon(icon)
+                self.btn_export.setIconSize(QSize(22, 22))
+                # Иконка справа от текста + немного больший зазор
+                self.btn_export.setLayoutDirection(Qt.RightToLeft)
+        except:
+            pass
         
-        bottom_btns.addWidget(self.btn_settings)
-        bottom_btns.addWidget(self.btn_second)
-        bottom_btns.addWidget(self.btn_export)
-        bottom_btns.addStretch()  # Отступ между группой 2 и группой 3
+        bottom_btns.addWidget(self.btn_settings, 0, 1)
+        bottom_btns.addWidget(self.btn_export, 0, 2)
         
         # ГРУППА 3: Play/Pause (круглая кнопка)
-        self.btn_play_pause = QPushButton("▶")
+        self.btn_play_pause = QPushButton("")
         self.btn_play_pause.setFixedSize(54, 54)
         self.btn_play_pause.setObjectName("RoundBlackButton")
+        # Новая логика: кнопка-тоггл (checked = running)
+        self.btn_play_pause.setCheckable(True)
+        self.btn_play_pause.setChecked(False)
+        self.btn_play_pause.toggled.connect(self._on_play_toggled)
+        # Возвращаем классическое поведение: клик запускает/останавливает анимацию
         self.btn_play_pause.clicked.connect(self.on_start_stop)
+        # Жёсткая инициализация иконок play/pause
+        self._init_play_icons()
+        self._update_play_button_icon()
         
-        bottom_btns.addWidget(self.btn_play_pause)
+        # Нижний ряд: генерация, второй вьюпорт, play
+        bottom_btns.addWidget(self.btn_generate, 1, 0)
+        bottom_btns.addWidget(self.btn_second, 1, 1)
+        bottom_btns.addWidget(self.btn_play_pause, 1, 2, Qt.AlignLeft)
         
-        left_layout.addLayout(bottom_btns)
+        # Сохраняем ссылку на контейнер кнопок и расставляем по брейкпоинтам
+        self.bottom_buttons_layout = bottom_btns
+        self._arrange_bottom_buttons()
+        # Оборачиваем в контейнер с фиксированными отступами и растяжением по ширине превью
+        buttons_container = QWidget()
+        buttons_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        btns_wrap = QVBoxLayout(buttons_container)
+        btns_wrap.setContentsMargins(0, 0, 0, 0)
+        btns_wrap.addLayout(self.bottom_buttons_layout)
+        self.buttons_container = buttons_container
+        # Выравниваем контейнер кнопок по левому краю и ограничиваем его шириной превью в resizeEvent
+        left_layout.addWidget(buttons_container, 0, Qt.AlignLeft)
         root.addLayout(left_layout, 3)
         
-        # Правая часть: Табы + контент
+        # Правая часть: Табы + контент (скроллируемая панель)
         right_layout = QVBoxLayout()
         right_layout.setSpacing(0)
         
@@ -2505,8 +2667,8 @@ class MainWindow(QWidget):
         
         # Отступ 15px между табами и контентом
         right_layout.addSpacing(15)
-        
-        # Stacked widget для контента табов
+
+        # Оборачиваем контент табов в QScrollArea — фиксируем расстояния, при нехватке места включается вертикальный скролл
         self.tab_content = QStackedWidget()
         self.tab_content.addWidget(self._create_canvas_tab())
         self.tab_content.addWidget(self._create_color_tab())
@@ -2514,7 +2676,14 @@ class MainWindow(QWidget):
         self.tab_content.addWidget(self._create_postfx_tab())
         self.tab_content.addWidget(self._create_export_tab())
         
-        right_layout.addWidget(self.tab_content)
+        self.tab_content.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        content_scroll = QScrollArea()
+        content_scroll.setWidgetResizable(True)
+        content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        content_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        content_scroll.setStyleSheet("QScrollArea{background: transparent; border: none;}")
+        content_scroll.setWidget(self.tab_content)
+        right_layout.addWidget(content_scroll)
         
         root.addLayout(right_layout, 1)
         
@@ -2595,6 +2764,7 @@ class MainWindow(QWidget):
         self.cb_font.addItems(sorted(self.font_map.keys()) or ["PIL-Default"])
         self.cb_font.currentTextChanged.connect(self.on_font_changed)
         self.cb_font.setFixedHeight(44)
+        self.cb_font.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.cb_font.setStyleSheet("""
             QComboBox {
                 background: transparent;
@@ -2620,7 +2790,7 @@ class MainWindow(QWidget):
                 height: 0;
             }
         """)
-        font_combo_row.addWidget(self.cb_font)
+        font_combo_row.addWidget(self.cb_font, 1)
         font_layout.addLayout(font_combo_row)
         font_layout.addSpacing(10)  # Отступ между выбором шрифта и кеглем
         
@@ -2658,6 +2828,7 @@ class MainWindow(QWidget):
         self.custom_symbols_input.setPlaceholderText("например: TIPIDOR")
         self.custom_symbols_input.setMaxLength(100)
         self.custom_symbols_input.setFixedHeight(40)
+        self.custom_symbols_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.custom_symbols_input.textChanged.connect(self.on_custom_symbols_changed)
         self.custom_symbols_input.setStyleSheet("""
             QLineEdit {
@@ -4034,15 +4205,16 @@ class MainWindow(QWidget):
         
     def _apply_figma_style(self):
         # Применяет стили из Figma дизайна
-        self.setStyleSheet("""
+        t = self.ui_theme
+        css = """
             * {
                 font-family: 'Helvetica Neue', 'Segoe UI', 'Helvetica', 'Arial', sans-serif;
                 font-weight: 400;
             }
             
             QWidget {
-                background: #3F3F3F;
-                color: #FFFFFF;
+                background: __UI_BG__;
+                color: __UI_TEXT__;
             }
             
             /* Табы */
@@ -4060,7 +4232,7 @@ class MainWindow(QWidget):
             
             QTabBar::tab {
                 background: #000000;
-                color: #FFFFFF;
+                color: __UI_TEXT__;
                 padding: 13px 22px;
                 border-top-left-radius: 20px;
                 border-top-right-radius: 20px;
@@ -4072,16 +4244,16 @@ class MainWindow(QWidget):
             
             QTabBar::tab:selected {
                 background: #000000;
-                color: #FFFFFF;
+                color: __UI_TEXT__;
             }
             
             QTabBar::tab:!selected {
                 background: #000000;
-                color: #666666;
+                color: rgba(255,255,255,0.4);
             }
             
             QTabBar::tab:hover:!selected {
-                color: #999999;
+                color: rgba(255,255,255,0.6);
             }
             
             /* Секции */
@@ -4096,25 +4268,25 @@ class MainWindow(QWidget):
             QGroupBox QLabel#SectionTitle {
                 font-size: 16px;
                 font-weight: 300;
-                color: #FFFFFF;
+                color: __UI_TEXT__;
                 background: transparent;
             }
             
             /* Лейблы */
             QLabel {
                 font-size: 16px;
-                color: #FFFFFF;
+                color: __UI_TEXT__;
                 background: transparent;
             }
             
             /* Числа в степперах */
             NumberDisplay {
                 background: #000000;
-                border: 2px solid #FFFFFF;
+                border: 2px solid __BTN_BORDER__;
                 border-radius: 10px;
                 font-size: 24px;
                 font-weight: bold;
-                color: #FFFFFF;
+                color: __UI_TEXT__;
             }
             
             NumberDisplay:hover {
@@ -4125,9 +4297,9 @@ class MainWindow(QWidget):
             /* Кнопки -/+ */
             RoundButton {
                 background: #000000;
-                border: 1px solid #FFFFFF;
+                border: 1px solid __BTN_BORDER__;
                 border-radius: 20px;
-                color: #FFFFFF;
+                color: __UI_TEXT__;
                 font-size: 20px;
             }
             
@@ -4138,11 +4310,11 @@ class MainWindow(QWidget):
             /* Комбобокс */
             QComboBox {
                 background: #000000;
-                border: 2px solid #FFFFFF;
+                border: 2px solid __BTN_BORDER__;
                 border-radius: 20px;
                 padding: 12px 14px;
                 font-size: 16px;
-                color: #FFFFFF;
+                color: __UI_TEXT__;
             }
             
             QComboBox::drop-down {
@@ -4154,7 +4326,7 @@ class MainWindow(QWidget):
                 image: none;
                 border-left: 5px solid transparent;
                 border-right: 5px solid transparent;
-                border-top: 5px solid #FFFFFF;
+                border-top: 5px solid __UI_TEXT__;
                 margin-right: 10px;
             }
             
@@ -4162,25 +4334,25 @@ class MainWindow(QWidget):
             QCheckBox {
                 spacing: 8px;
                 font-size: 16px;
-                color: #FFFFFF;
+                color: __UI_TEXT__;
             }
             
             QCheckBox::indicator {
                 width: 23px;
                 height: 23px;
                 background: transparent;
-                border: 2px solid #FFFFFF;
+                border: 2px solid __BTN_BORDER__;
                 border-radius: 8px;
             }
             
             QCheckBox::indicator:checked {
-                background: #FFFFFF;
+                background: __BTN_BG__;
             }
             
             /* Кнопки (основные) */
             QPushButton {
-                background: #FFFFFF;
-                color: #000000;
+                background: __BTN_BG__;
+                color: __BTN_TEXT__;
                 border: none;
                 border-radius: 20px;
                 font-size: 16px;
@@ -4195,8 +4367,8 @@ class MainWindow(QWidget):
             /* Черные кнопки с обводкой */
             QPushButton#BlackButton {
                 background: #000000;
-                color: #FFFFFF;
-                border: 2px solid #FFFFFF;
+                color: __UI_TEXT__;
+                border: 2px solid __BTN_BORDER__;
             }
             
             QPushButton#BlackButton:hover {
@@ -4206,7 +4378,7 @@ class MainWindow(QWidget):
             /* Черные кнопки БЕЗ обводки */
             QPushButton#BlackButtonNoBorder {
                 background: #000000;
-                color: #FFFFFF;
+                color: __UI_TEXT__;
                 border: none;
             }
             
@@ -4217,7 +4389,7 @@ class MainWindow(QWidget):
             /* Круглые черные кнопки */
             QPushButton#RoundBlackButton {
                 background: #000000;
-                color: #FFFFFF;
+                color: __UI_TEXT__;
                 border: none;
                 border-radius: 27px;
                 font-size: 20px;
@@ -4233,13 +4405,33 @@ class MainWindow(QWidget):
                 border: none;
                 border-radius: 30px;
             }
-        """)
+        """
+        css = (css
+            .replace('__UI_BG__', t['ui_bg'])
+            .replace('__UI_TEXT__', t['ui_text'])
+            .replace('__BTN_BG__', t['button_bg'])
+            .replace('__BTN_TEXT__', t['button_text'])
+            .replace('__BTN_BORDER__', t['button_border'])
+        )
+        self.setStyleSheet(css)
         
         # Применяем ObjectName для черных кнопок
         self.btn_generate.setObjectName("BlackButtonNoBorder")
         self.btn_play_pause.setObjectName("RoundBlackButton")
         self.btn_settings.setObjectName("BlackButtonNoBorder")
         self.btn_second.setObjectName("BlackButtonNoBorder")
+
+    def get_ui_theme(self):
+        # Возвращает текущую тему UI
+        return self.ui_theme.copy()
+
+    def apply_ui_theme(self, theme_dict):
+        # Применяет новую тему UI и обновляет стили
+        if not isinstance(theme_dict, dict):
+            return
+        self.ui_theme.update({k: v for k, v in theme_dict.items() if k in self.ui_theme})
+        self._apply_figma_style()
+        self.update()
     
     def _sync_color_ui(self):
         # Синхронизирует начальные значения color_stops с UI элементами
@@ -4476,6 +4668,8 @@ class MainWindow(QWidget):
         self.stepper_rows.setValue(rows)
         if self.mode == "рой":
             self._init_particles()
+        # При загрузке изображения автоматически запускаем анимацию
+        self._set_running(True)
         self.update_preview(True)
         
     def on_generate_pattern(self):
@@ -4499,17 +4693,13 @@ class MainWindow(QWidget):
         self.stepper_rows.setValue(rows)
         if self.mode == "рой":
             self._init_particles()
+        # Генерация паттерна тоже стартует анимацию
+        self._set_running(True)
         self.update_preview(True)
         
     def on_start_stop(self):
-        self.running = not self.running
-        
-        # Обновляем иконку кнопки
-        if self.running:
-            self.btn_play_pause.setText("⏸")
-        else:
-            self.btn_play_pause.setText("▶")
-        
+        # Традиционное поведение: клик меняет состояние
+        self._set_running(not self.running)
         # Управление audio stream
         if self.mode == "audio":
             if self.running and sd is not None:
@@ -4685,19 +4875,18 @@ class MainWindow(QWidget):
                 if reply == QMessageBox.No:
                     return
             
-        # Получаем параметры из UI
-        frames = self.stepper_frames.value()
-        fps = self.stepper_fps.value()
-        upscale = self.stepper_upscale.value() / 100.0
-        target_w = self.stepper_width.value() if self.stepper_width.value() > 0 else None
-        target_h = self.stepper_height.value() if self.stepper_height.value() > 0 else None
-        loop = self.cb_loop.isChecked()
+        # Получаем параметры из UI (с безопасными значениями по умолчанию)
+        frames = self.stepper_frames.value() if getattr(self, 'stepper_frames', None) else 120
+        fps = self.stepper_fps.value() if getattr(self, 'stepper_fps', None) else 30
+        upscale = (self.stepper_upscale.value() / 100.0) if getattr(self, 'stepper_upscale', None) else 1.0
+        target_w = self.stepper_width.value() if getattr(self, 'stepper_width', None) and self.stepper_width.value() > 0 else None
+        target_h = self.stepper_height.value() if getattr(self, 'stepper_height', None) and self.stepper_height.value() > 0 else None
+        loop = self.cb_loop.isChecked() if getattr(self, 'cb_loop', None) else True
         crf = 20
         
         # Останавливаем анимацию
         was_running = self.running
-        self.running = False
-        self.btn_play_pause.setText("▶")
+        self._set_running(False)
         
         # Создаем диалог прогресса
         self.loader = LoaderDialog("рендер")
@@ -4710,9 +4899,7 @@ class MainWindow(QWidget):
         def on_done(path):
             self.loader.close()
             QMessageBox.information(self, "готово", f"сохранено:\n{path}")
-            self.running = was_running
-            # Обновляем иконку кнопки
-            self.btn_play_pause.setText("⏸" if self.running else "▶")
+            self._set_running(was_running)
             
         def on_error(msg):
             self.loader.close()
@@ -4723,9 +4910,7 @@ class MainWindow(QWidget):
             error_dialog.setText("Не удалось экспортировать видео")
             error_dialog.setDetailedText(msg)
             error_dialog.exec()
-            self.running = was_running
-            # Обновляем иконку кнопки
-            self.btn_play_pause.setText("⏸" if self.running else "▶")
+            self._set_running(was_running)
             
         worker.done.connect(on_done)
         worker.error.connect(on_error)
@@ -4882,6 +5067,38 @@ class MainWindow(QWidget):
         # Remove blur and overlay after dialog closes
         self.setGraphicsEffect(None)
         overlay.deleteLater()
+
+    def _update_play_button_icon(self):
+        try:
+            icon = self.icon_pause if self.running else self.icon_play
+            self.btn_play_pause.setIcon(QIcon())
+            if not icon.isNull():
+                self.btn_play_pause.setIcon(icon)
+                self.btn_play_pause.setIconSize(QSize(22, 22))
+            self.btn_play_pause.update()
+        except:
+            pass
+
+    def _init_play_icons(self):
+        base_dir = os.path.dirname(__file__)
+        project_icons = os.path.join(base_dir, 'icons')
+        absolute_icons = r"C:\\Users\\mikha\\Documents\\gen16\\icons"
+        search_dirs = []
+        # 1) Абсолютный путь, который указал пользователь
+        if os.path.isdir(absolute_icons):
+            search_dirs.append(absolute_icons)
+        # 2) Локальная папка проекта
+        if os.path.isdir(project_icons):
+            search_dirs.append(project_icons)
+        def load_exact(name):
+            for d in search_dirs:
+                for ext in ('.svg', '.png', '.svg.svg'):
+                    p = os.path.join(d, name + ext)
+                    if os.path.exists(p):
+                        return QIcon(p)
+            return QIcon()
+        self.icon_play = load_exact('play')
+        self.icon_pause = load_exact('pause')
         
     def on_second_window(self):
         if self.second is None or not isinstance(self.second, FullscreenPreview):
@@ -4935,6 +5152,10 @@ class MainWindow(QWidget):
                 self.update_preview()
             elif self.running and self.base_gray is not None:
                 self.update_preview()
+        # Синхронизация иконки play/pause при внешних изменениях состояния
+        if getattr(self, '_last_running_state', None) != self.running:
+            self._update_play_button_icon()
+            self._last_running_state = self.running
             
     def _recalc_cell_size(self):
         w,h = self._measure_cell(self.font_pil, "M")
@@ -4998,11 +5219,13 @@ class MainWindow(QWidget):
         sensitivity = self.contour_edge_sensitivity / 100.0  # 0.0 - 1.0
         edges = self._detect_simple_edges(base_image, sensitivity)
         
-        # Применяем размытие к краям если нужно
+        # Применяем размытие к краям если нужно: scipy (если доступна) или fallback
         if self.contour_edge_blur > 0:
-            blur_amount = int(self.contour_edge_blur / 100.0 * 5) + 1  # 1-5
-            from scipy.ndimage import gaussian_filter
-            edges = gaussian_filter(edges, sigma=blur_amount)
+            blur_amount = max(1, int(self.contour_edge_blur / 100.0 * 5))  # 1-5
+            if SCIPY_AVAILABLE:
+                edges = _scipy_gaussian_filter(edges, sigma=blur_amount)
+            else:
+                edges = self._gaussian_blur_numpy(edges, blur_amount)
         
         # Создаем анимированные волны на краях
         wave_speed = self.contour_wave_speed / 100.0  # 0.0 - 2.0
@@ -5025,6 +5248,25 @@ class MainWindow(QWidget):
         )
         
         return result
+
+    def _gaussian_blur_numpy(self, img, radius):
+        # Простое приближение гаусса через два прохода box blur
+        if radius <= 0:
+            return img
+        h, w = img.shape
+        # По X
+        temp = np.zeros_like(img)
+        for y in range(h):
+            for x in range(w):
+                x0 = max(0, x - radius); x1 = min(w - 1, x + radius)
+                temp[y, x] = img[y, x0:x1+1].mean()
+        # По Y
+        out = np.zeros_like(img)
+        for x in range(w):
+            for y in range(h):
+                y0 = max(0, y - radius); y1 = min(h - 1, y + radius)
+                out[y, x] = temp[y0:y1+1, x].mean()
+        return out
     
     def _detect_simple_edges(self, image, sensitivity=0.3):
         # Простое обнаружение краев с учетом чувствительности
