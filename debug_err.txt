@@ -1,0 +1,4 @@
+  File "C:\Users\mikha\Documents\ASCI-inator\ascii_wave_animator.py", line 629
+    im = self.main.render_frame_pil(
+IndentationError: expected an indented block after 'else' statement on line 628
+Exit code: 
