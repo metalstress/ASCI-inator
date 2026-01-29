@@ -4302,7 +4302,7 @@ class MainWindow(QWidget):
         format_label.setStyleSheet("color: white; font-size: 16px; background: transparent;")
         
         self.cb_export_format = QComboBox()
-        self.cb_export_format.addItems(["gif", "mp4"])
+        self.cb_export_format.addItems(["gif", "mp4", "png"])
         self.cb_export_format.currentTextChanged.connect(self.on_export_format_changed)
         self.cb_export_format.setFixedHeight(44)
         self.cb_export_format.setStyleSheet("""
@@ -4429,17 +4429,78 @@ class MainWindow(QWidget):
         loop_row.addWidget(loop_label)
         loop_row.addStretch()
         loop_row.addWidget(self.cb_loop)
+        
         export_layout.addLayout(loop_row)
-        # Use GL preview frames for export (best effort)
-        gl_row = QHBoxLayout(); gl_row.setContentsMargins(0, 0, 0, 0)
-        gl_label = QLabel("use OpenGL preview frames")
-        gl_label.setStyleSheet("color: white; font-size: 16px; background: transparent;")
-        self.chk_export_gl = CustomCheckbox("")
-        self.chk_export_gl.setChecked(False)
-        gl_row.addWidget(gl_label)
-        gl_row.addStretch()
-        gl_row.addWidget(self.chk_export_gl)
-        export_layout.addLayout(gl_row)
+
+        export_layout.addSpacing(10)
+
+        # Background (for PNG export) — segmented toggle: transparent / colored
+        bg_row = QHBoxLayout()
+        bg_row.setContentsMargins(0, 0, 0, 0)
+        bg_label = QLabel("background (for png export)")
+        bg_label.setStyleSheet("color: white; font-size: 16px; background: transparent;")
+
+        bg_toggle = QWidget()
+        bg_toggle.setFixedSize(240, 44)
+        bg_toggle.setStyleSheet("""
+            QWidget {
+                background: transparent;
+                border: 2px solid rgba(255,255,255,0.3);
+                border-radius: 22px;
+            }
+        """)
+        bg_toggle_l = QHBoxLayout(bg_toggle)
+        bg_toggle_l.setContentsMargins(2, 2, 2, 2)
+        bg_toggle_l.setSpacing(0)
+
+        self.btn_bg_transparent = QPushButton("transparent")
+        self.btn_bg_colored = QPushButton("colored")
+        for b in (self.btn_bg_transparent, self.btn_bg_colored):
+            b.setCheckable(True)
+            b.setFixedHeight(40)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setStyleSheet("""
+                QPushButton {
+                    background: transparent;
+                    color: rgba(255,255,255,0.7);
+                    border: none;
+                    font-size: 20px;
+                    padding: 0 18px;
+                }
+                QPushButton:hover {
+                    background: rgba(255,255,255,0.06);
+                }
+                QPushButton:checked {
+                    background: rgba(255,255,255,1);
+                    color: rgba(0,0,0,1);
+                }
+            """)
+
+        # Rounded corners for selected segments
+        self.btn_bg_transparent.setStyleSheet(self.btn_bg_transparent.styleSheet() + "\nQPushButton:checked { border-top-left-radius: 20px; border-bottom-left-radius: 20px; }")
+        self.btn_bg_colored.setStyleSheet(self.btn_bg_colored.styleSheet() + "\nQPushButton:checked { border-top-right-radius: 20px; border-bottom-right-radius: 20px; }")
+
+        self._png_bg_mode = "colored"  # default
+        self.btn_bg_colored.setChecked(True)
+
+        from PySide6.QtWidgets import QButtonGroup
+        self._bg_group = QButtonGroup(self)
+        self._bg_group.setExclusive(True)
+        self._bg_group.addButton(self.btn_bg_transparent)
+        self._bg_group.addButton(self.btn_bg_colored)
+
+        def _set_bg_mode():
+            self._png_bg_mode = "transparent" if self.btn_bg_transparent.isChecked() else "colored"
+        self.btn_bg_transparent.toggled.connect(lambda _: _set_bg_mode())
+        self.btn_bg_colored.toggled.connect(lambda _: _set_bg_mode())
+
+        bg_toggle_l.addWidget(self.btn_bg_transparent)
+        bg_toggle_l.addWidget(self.btn_bg_colored)
+
+        bg_row.addWidget(bg_label)
+        bg_row.addStretch()
+        bg_row.addWidget(bg_toggle)
+        export_layout.addLayout(bg_row)
         
         layout.addWidget(export_section)
         
@@ -4448,8 +4509,13 @@ class MainWindow(QWidget):
         
     def on_export_format_changed(self, fmt):
         # Обработчик смены формата экспорта
-        is_gif = fmt == "gif"
-        self.cb_loop.setEnabled(is_gif)
+        is_gif = (fmt == "gif")
+        is_png = (fmt == "png")
+        if hasattr(self, 'cb_loop'):
+            self.cb_loop.setEnabled(is_gif)
+        if hasattr(self, 'btn_bg_transparent') and hasattr(self, 'btn_bg_colored'):
+            self.btn_bg_transparent.setEnabled(is_png)
+            self.btn_bg_colored.setEnabled(is_png)
         
     def _create_new_section(self, title):
         # Создает секцию в стиле редизайна: черный фон, серый заголовок
@@ -5223,6 +5289,58 @@ class MainWindow(QWidget):
             return
             
         fmt = self.cb_export_format.currentText().upper()
+
+        # PNG: single-frame export (current paused frame)
+        if fmt == "PNG":
+            fn, _ = QFileDialog.getSaveFileName(self, "сохранить png", "ascii.png", "PNG (*.png)")
+            if not fn:
+                return
+
+            was_running = self.running
+            self._set_running(False)
+            try:
+                export_font = self._load_font(self.font_name, self.anim_font_px)
+                cw, ch = self._measure_cell(export_font)
+                im = self.render_frame_pil(
+                    t=self.t,
+                    font=export_font,
+                    cell_w=cw,
+                    cell_h=ch,
+                    use_cache=False,
+                    for_preview=False
+                )
+                if im is None:
+                    raise Exception("Не удалось отрендерить кадр")
+
+                target_w = self.stepper_width.value() if getattr(self, 'stepper_width', None) and self.stepper_width.value() > 0 else None
+                target_h = self.stepper_height.value() if getattr(self, 'stepper_height', None) and self.stepper_height.value() > 0 else None
+                upscale = (self.stepper_upscale.value() / 100.0) if getattr(self, 'stepper_upscale', None) else 1.0
+
+                if target_w and target_h:
+                    im = im.resize((int(target_w), int(target_h)), Image.NEAREST)
+                if abs(float(upscale) - 1.0) > 1e-6:
+                    tw = int(im.width * float(upscale))
+                    th = int(im.height * float(upscale))
+                    im = im.resize((tw, th), Image.NEAREST)
+
+                im = self.postfx.apply_export_fx(im)
+
+                mode = getattr(self, '_png_bg_mode', 'colored')
+                if mode == "transparent":
+                    bg = np.array(self.render_bg, dtype=np.int16).reshape(1,1,3)
+                    arr = np.array(im.convert("RGB"), dtype=np.int16)
+                    diff = np.sqrt(((arr - bg) ** 2).sum(axis=2))
+                    alpha = np.clip(diff * 4.0, 0, 255).astype(np.uint8)
+                    rgba = np.dstack([arr.astype(np.uint8), alpha])
+                    im = Image.fromarray(rgba, mode="RGBA")
+
+                im.save(fn, format="PNG")
+                QMessageBox.information(self, "done", f"saved:\n{fn}")
+            except Exception as e:
+                QMessageBox.critical(self, "export error", str(e))
+            finally:
+                self._set_running(was_running)
+            return
         
         # Проверяем доступность ffmpeg для MP4
         if fmt == "MP4":
@@ -5469,37 +5587,62 @@ class MainWindow(QWidget):
         overlay.deleteLater()
 
     def _update_play_button_icon(self):
+        # pause icon when running, play icon when stopped
         try:
             icon = self.icon_pause if self.running else self.icon_play
             self.btn_play_pause.setIcon(QIcon())
-            if not icon.isNull():
+            self.btn_play_pause.setText("")
+            if icon is not None and (not icon.isNull()):
                 self.btn_play_pause.setIcon(icon)
                 self.btn_play_pause.setIconSize(QSize(22, 22))
+            else:
+                # fallback if icons can't be loaded/rendered
+                self.btn_play_pause.setText("❚❚" if self.running else "▶")
             self.btn_play_pause.update()
-        except:
+        except Exception:
             pass
 
     def _init_play_icons(self):
+        # Robust icon lookup (dev run + portable/pyinstaller)
         base_dir = os.path.dirname(__file__)
-        project_icons = os.path.join(base_dir, 'icons')
-        absolute_icons = r"C:\\Users\\mikha\\Documents\\gen16\\icons"
+        cwd_dir = os.getcwd()
         search_dirs = []
-        # 1) Абсолютный путь, который указал пользователь
-        if os.path.isdir(absolute_icons):
-            search_dirs.append(absolute_icons)
-        # 2) Локальная папка проекта
+
+        # 0) PyInstaller bundle dir
+        try:
+            if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+                meipass_icons = os.path.join(sys._MEIPASS, 'icons')
+                if os.path.isdir(meipass_icons):
+                    search_dirs.append(meipass_icons)
+        except Exception:
+            pass
+
+        # 1) Current working directory icons/
+        cwd_icons = os.path.join(cwd_dir, 'icons')
+        if os.path.isdir(cwd_icons):
+            search_dirs.append(cwd_icons)
+
+        # 2) Script directory icons/
+        project_icons = os.path.join(base_dir, 'icons')
         if os.path.isdir(project_icons):
             search_dirs.append(project_icons)
-        def load_exact(name):
+
+        # 3) Backward-compat absolute path (if exists)
+        absolute_icons = r"C:\Users\mikha\Documents\gen16\icons"
+        if os.path.isdir(absolute_icons):
+            search_dirs.append(absolute_icons)
+
+        def load_exact(name: str) -> QIcon:
             for d in search_dirs:
-                for ext in ('.svg', '.png', '.svg.svg'):
+                for ext in ('.png', '.svg', '.svg.svg'):
                     p = os.path.join(d, name + ext)
                     if os.path.exists(p):
                         return QIcon(p)
             return QIcon()
+
         self.icon_play = load_exact('play')
         self.icon_pause = load_exact('pause')
-        
+
     def on_second_window(self):
         if self.second is None or not isinstance(self.second, FullscreenPreview):
             self.second = FullscreenPreview()
@@ -6157,3 +6300,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+    def set_png_bg_mode(self, mode):
+        self.png_background_mode = mode
+        self.btn_bg_transparent.setChecked(mode == "transparent")
+        self.btn_bg_colored.setChecked(mode == "colored")
