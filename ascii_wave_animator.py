@@ -654,14 +654,59 @@ class ExportWorker(QThread):
             out = []
             
             # Для экспорта НЕ используем кэш и downsampling - максимальное качество
-            # Детеминированный таймлайн: t шаг = (1 / экспортный FPS) * (speed/100)
+            # Стараемся 1-в-1 повторить то, что видно во вьюпорте:
+            # - скорость задаётся animation_speed_percent
+            # - базовый шаг симуляции = 1/base_fps (как в on_tick)
+            # - реальная скорость во вьюпорте зависит от частоты тиков таймера и режима Accurate Preview
             speed_mul = max(0.0, float(self.main.animation_speed_percent) / 100.0)
-            dt_export = (1.0 / max(1, self.fps)) * speed_mul
-            start_t = 0.0
+            base_fps = max(1, int(getattr(self.main, 'base_fps', 30)))
+
+            # Частота тиков preview-таймера (как реально обновляется во вьюпорте)
+            preview_tick_fps = base_fps
+            try:
+                if hasattr(self.main, 'timer') and self.main.timer is not None:
+                    ms = int(self.main.timer.interval())
+                    if ms > 0:
+                        preview_tick_fps = max(1, int(round(1000.0 / ms)))
+            except Exception:
+                pass
+
+            # Во вьюпорте в Accurate Preview кадр рисуется реже (каждый 3-й тик),
+            # а если включён CRT shake — чаще (каждый 2-й тик). Это влияет на "видимую" частоту кадров.
+            display_ticks = 1
+            try:
+                if getattr(self.main.postfx, 'accurate_preview', False):
+                    if getattr(self.main.postfx, 'crt_enabled', False) and getattr(self.main.postfx, 'crt_shake', 0) > 0:
+                        display_ticks = 2
+                    else:
+                        display_ticks = 3
+            except Exception:
+                display_ticks = 1
+
+            # FPS вывода: по умолчанию = видимому FPS во вьюпорте (timer_fps / display_ticks)
+            export_fps = max(1, int(round(float(preview_tick_fps) / float(display_ticks))))
+            # Caps: GIF физически ограничен шагом 0.01с; MP4 — можно выше, но без фанатизма.
+            if self.fmt == 'GIF':
+                export_fps = min(100, export_fps)
+            else:
+                export_fps = min(240, export_fps)
+
+            # Пересчитываем количество кадров из длительности (если main предоставил duration_sec)
+            try:
+                dur = float(getattr(self.main, 'export_duration_seconds', None))
+                if dur and dur > 0:
+                    self.frames = max(1, int(round(dur * export_fps)))
+            except Exception:
+                pass
+
+            # Симуляционное время во вьюпорте: t растёт на (1/base_fps)*speed за каждый тик таймера.
+            # Значит, за одну реальную секунду t увеличивается на (preview_tick_fps/base_fps)*speed.
+            sim_rate = (float(preview_tick_fps) / float(base_fps)) * speed_mul
+
             for i in range(self.frames):
                 if self._cancel:
                     return
-                t_now = start_t + i * dt_export
+                t_now = (float(i) / float(export_fps)) * sim_rate
                 
                 # Обновляем shake для каждого кадра
                 if self.main.postfx.crt_enabled and self.main.postfx.crt_shake > 0:
@@ -732,7 +777,7 @@ class ExportWorker(QThread):
                         try:
                             writer = imageio.get_writer(
                                 self.fn, 
-                                fps=self.fps, 
+                                fps=export_fps, 
                                 codec='libx264',
                                 quality=10,
                                 ffmpeg_log_level='error',
@@ -2899,6 +2944,10 @@ class MainWindow(QWidget):
         
         # === SECTION: Font ===
         font_section, font_layout = self._create_new_section("font")
+        try:
+            font_section.setMinimumHeight(180)
+        except Exception:
+            pass
         
         # Dropdown font selector
         font_combo_row = QHBoxLayout()
@@ -2935,13 +2984,26 @@ class MainWindow(QWidget):
         """)
         font_combo_row.addWidget(self.cb_font, 1)
         font_layout.addLayout(font_combo_row)
-        font_layout.addSpacing(10)  # Spacing between font selection and size
         
-        # Font size
-        self.stepper_kegl = NewStepperWidget(self.anim_font_px, 8, 64, self, "font size")
+        font_layout.addSpacing(18)
+
+        # font size
+        font_size_row = QHBoxLayout()
+        font_size_row.setContentsMargins(0, 0, 0, 0)
+        font_size_row.setSpacing(12)
+
+        font_size_label = QLabel("font size")
+        font_size_label.setStyleSheet("color: white; font-size: 16px; background: transparent;")
+
+        self.stepper_kegl = NewStepperWidget(int(getattr(self, "anim_font_px", 16)), 1, 256, self, "font size")
+        self.stepper_kegl.setFixedWidth(160)
         self.stepper_kegl.valueChanged.connect(self.on_anim_font_px_changed)
-        kegl_row_w = ResponsiveRow("font size", self.stepper_kegl, stack_breakpoint=380)
-        font_layout.addWidget(kegl_row_w)
+
+        font_size_row.addWidget(font_size_label)
+        font_size_row.addStretch()
+        font_size_row.addWidget(self.stepper_kegl)
+
+        font_layout.addLayout(font_size_row)
         
         layout.addWidget(font_section)
         
@@ -4335,41 +4397,32 @@ class MainWindow(QWidget):
         format_row.addStretch()
         format_row.addWidget(self.cb_export_format, 0, Qt.AlignRight)
         export_layout.addLayout(format_row)
+        export_layout.addSpacing(10)
+
+        # duration (sec) — replaces frames & fps
+        dur_row = QHBoxLayout()
+        dur_row.setContentsMargins(0, 0, 0, 0)
+        dur_row.setSpacing(12)
+
+        dur_label = QLabel("duration (sec)")
+        dur_label.setStyleSheet("color: white; font-size: 16px; background: transparent;")
+        dur_row.addWidget(dur_label)
+        dur_row.addStretch()
+
+        self.stepper_duration = NewStepperWidget(int(getattr(self, "export_duration_seconds", 6)), 1, 99999, self, "duration (sec)")
+        self.stepper_duration.valueChanged.connect(self.on_export_duration_changed)
+        self.stepper_duration.setFixedWidth(160)
+        dur_row.addWidget(self.stepper_duration)
+
+        export_layout.addLayout(dur_row)
         export_layout.addSpacing(10)  # 10px between elements
-        
-        # Number of frames (number + pill)
-        frames_row = QHBoxLayout()
-        frames_row.setContentsMargins(0, 0, 0, 0)
-        frames_label = QLabel("number of frames")
-        frames_label.setStyleSheet("color: white; font-size: 16px; background: transparent;")
-        self.stepper_frames = NewStepperWidget(120, 2, 600, self, "number of frames")
-        frames_row.addWidget(frames_label)
-        frames_row.addStretch()
-        frames_row.addWidget(self.stepper_frames)
-        export_layout.addLayout(frames_row)
-        export_layout.addSpacing(10)
-        
-        # FPS (number + pill)
-        fps_row = QHBoxLayout()
-        fps_row.setContentsMargins(0, 0, 0, 0)
-        fps_label = QLabel("fps")
-        fps_label.setStyleSheet("color: white; font-size: 16px; background: transparent;")
-        # Calculate FPS from percentage: base_fps * (percent / 100)
-        initial_fps = int(self.base_fps * (self.animation_speed_percent / 100.0))
-        self.stepper_fps = NewStepperWidget(initial_fps, 1, 300, self, "fps")
-        self.stepper_fps.valueChanged.connect(self.on_export_fps_changed)
-        fps_row.addWidget(fps_label)
-        fps_row.addStretch()
-        fps_row.addWidget(self.stepper_fps)
-        export_layout.addLayout(fps_row)
-        export_layout.addSpacing(10)
-        
         # Width (number + pill)
         width_row = QHBoxLayout()
         width_row.setContentsMargins(0, 0, 0, 0)
         width_label = QLabel("width")
         width_label.setStyleSheet("color: white; font-size: 16px; background: transparent;")
         self.stepper_width = NewStepperWidget(512, 100, 10000, self, "width")
+        self.stepper_width.setFixedWidth(160)
         width_row.addWidget(width_label)
         width_row.addStretch()
         width_row.addWidget(self.stepper_width)
@@ -4382,6 +4435,7 @@ class MainWindow(QWidget):
         height_label = QLabel("height")
         height_label.setStyleSheet("color: white; font-size: 16px; background: transparent;")
         self.stepper_height = NewStepperWidget(512, 100, 10000, self, "height")
+        self.stepper_height.setFixedWidth(160)
         height_row.addWidget(height_label)
         height_row.addStretch()
         height_row.addWidget(self.stepper_height)
@@ -4516,6 +4570,9 @@ class MainWindow(QWidget):
         if hasattr(self, 'btn_bg_transparent') and hasattr(self, 'btn_bg_colored'):
             self.btn_bg_transparent.setEnabled(is_png)
             self.btn_bg_colored.setEnabled(is_png)
+    def on_export_duration_changed(self, v: int):
+        self.export_duration_seconds = int(v)
+
         
     def _create_new_section(self, title):
         # Создает секцию в стиле редизайна: черный фон, серый заголовок
@@ -5083,6 +5140,11 @@ class MainWindow(QWidget):
             return
         pil = Image.open(fn).convert("RGB")
         arr = np.array(pil, dtype=np.uint8)
+        try:
+            _w, _h = pil.size
+            self._sync_export_resolution_to_image(_w, _h)
+        except Exception:
+            pass
         gray = to_grayscale(arr)
         grid, _, _ = resize_to_char_grid(gray, self.cell_w, self.cell_h, self.grid_cols, self.grid_rows)
         self.morph_target = grid
@@ -5097,6 +5159,10 @@ class MainWindow(QWidget):
         arr = np.array(pil, dtype=np.uint8)
         self.img_color = arr
         self.img_h, self.img_w = arr.shape[0], arr.shape[1]
+        try:
+            self._sync_export_resolution_to_image(self.img_w, self.img_h)
+        except Exception:
+            pass
         self._recalc_cell_size()
         gray = to_grayscale(arr)
         grid, cols, rows = resize_to_char_grid(gray, self.cell_w, self.cell_h, None, None)
@@ -5282,6 +5348,60 @@ class MainWindow(QWidget):
             self.update_preview(True)
         except Exception as e:
             QMessageBox.critical(self, "error", f"Failed to extract palette:\n{e}")
+    def _export_compute_fps(self) -> int:
+        # Reduce export stutter at high animation speed by increasing output FPS.
+        # If export FPS is low while animation speed is high, the animation advances too much per frame.
+        base = 30
+        try:
+            base = max(1, int(getattr(self, "base_fps", 30)))
+        except Exception:
+            base = 30
+
+        speed_pct = 100.0
+        try:
+            speed_pct = float(getattr(self, "animation_speed_percent", 100.0))
+        except Exception:
+            speed_pct = 100.0
+
+        # Scale FPS with speed so dt per exported frame stays close to the 100% case.
+        scaled = int(round(base * max(0.05, speed_pct / 100.0)))
+
+        # Format-aware caps (GIF doesn't benefit from ultra-high FPS; MP4 can handle more)
+        fmt = ""
+        try:
+            fmt = str(getattr(self, "export_format", "")).lower()
+        except Exception:
+            fmt = ""
+
+        cap = 60 if fmt == "gif" else 240
+        return max(1, min(cap, scaled))
+
+    def _export_compute_frames(self) -> int:
+        fps = self._export_compute_fps()
+        dur = float(getattr(self, "export_duration_seconds", 6))
+        return max(1, int(round(dur * fps)))
+    def _sync_export_resolution_to_image(self, w: int, h: int):
+        try:
+            w = int(w); h = int(h)
+            if w <= 0 or h <= 0:
+                return
+            self.export_w = w
+            self.export_h = h
+            # sync steppers if present
+            if hasattr(self, "stepper_width") and self.stepper_width is not None:
+                self.stepper_width.blockSignals(True)
+                self.stepper_width.setValue(w)
+                self.stepper_width.blockSignals(False)
+            if hasattr(self, "stepper_height") and self.stepper_height is not None:
+                self.stepper_height.blockSignals(True)
+                self.stepper_height.setValue(h)
+                self.stepper_height.blockSignals(False)
+        except Exception:
+            pass
+
+
+
+
         
     def on_export(self):
         if self.base_gray is None:
@@ -5388,8 +5508,9 @@ class MainWindow(QWidget):
                     return
             
         # Получаем параметры из UI (с безопасными значениями по умолчанию)
-        frames = self.stepper_frames.value() if getattr(self, 'stepper_frames', None) else 120
-        fps = self.stepper_fps.value() if getattr(self, 'stepper_fps', None) else 30
+        fps = self._export_compute_fps()
+        dur = float(self.stepper_duration.value()) if getattr(self, 'stepper_duration', None) else float(getattr(self, 'export_duration_seconds', 6))
+        frames = max(1, int(round(dur * fps)))
         upscale = (self.stepper_upscale.value() / 100.0) if getattr(self, 'stepper_upscale', None) else 1.0
         target_w = self.stepper_width.value() if getattr(self, 'stepper_width', None) and self.stepper_width.value() > 0 else None
         target_h = self.stepper_height.value() if getattr(self, 'stepper_height', None) and self.stepper_height.value() > 0 else None
